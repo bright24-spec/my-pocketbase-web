@@ -1,0 +1,19 @@
+FROM alpine:latest
+
+# ติดตั้ง curl และ unzip เพื่อดาวน์โหลด PocketBase
+RUN apk add --no-cache curl unzip
+
+# กำหนดเวอร์ชัน PocketBase ที่ต้องการใช้
+ARG PB_VERSION=0.22.x
+
+# ดาวน์โหลด PocketBase ตามสถาปัตยกรรมระบบ
+ADD https://github.com/pocketbase/pocketbase/releases/download/v${PB_VERSION}/pocketbase_${PB_VERSION}_linux_amd64.zip /tmp/pb.zip
+RUN unzip /tmp/pb.zip -d /pb/
+
+# คัดลอกโฟลเดอร์หน้าเว็บ HTML ของเราเข้าไปในตัวระบบ
+COPY pb_public /pb/pb_public
+
+EXPOSE 8090
+
+# รันเซิร์ฟเวอร์ PocketBase พร้อมรับพอร์ตจาก Render
+CMD ["/pb/pocketbase", "serve", "--http=0.0.0.0:10000"]
