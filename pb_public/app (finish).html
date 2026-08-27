@@ -1,0 +1,1127 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>โปรแกรมควบคุมค่าใช้จ่ายงานลงทุน (ระบบตัดงบประมาณ)</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React & React DOM -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Babel -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- SheetJS (Excel Export) -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap');
+    body {
+      font-family: 'Sarabun', sans-serif;
+      background-color: #f8fafc;
+    }
+    @media print {
+      body * {
+        visibility: hidden;
+      }
+      #printable-voucher, #printable-voucher * {
+        visibility: visible;
+      }
+      #printable-voucher {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%;
+        padding: 10mm;
+        background: white;
+        color: black;
+      }
+      .no-print {
+        display: none !important;
+      }
+    }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800 antialiased">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    const STORAGE_KEY = 'INVESTMENT_BUDGET_CONTROL_DB_V3';
+
+    const initialDB = {
+      projects: [
+        {
+          id: 1,
+          jobName: "ขยายเขตระบบจำหน่ายไฟฟ้า ชุมชนทุ่งทอง",
+          jobNo: "JOB-2026-0891",
+          department: "แผนกวิศวกรรมและก่อสร้าง",
+          networkNo: "NW-8890123",
+          budget100: {
+            labor: { amount: 200000, activity: "งานปักเสาพาดสายและติดตั้งอุปกรณ์", activityNo: "1" },
+            supervision: { amount: 50000, activity: "ค่าน้ำมันและค่าเบี้ยเลี้ยงควบคุมงาน", activityNo: "2" },
+            transport: { amount: 30000, activity: "ค่าขนส่งวัสดุอุปกรณ์และเครื่องจักร", activityNo: "3" },
+            misc: { amount: 20000, activity: "ค่าวัสดุเบ็ดเตล็ดและป้ายเตือนความปลอดภัย", activityNo: "4" }
+          },
+          deductions: [
+            {
+              id: "DED-001",
+              category: "labor",
+              categoryName: "ค่าแรง",
+              activity: "งานปักเสาพาดสายและติดตั้งอุปกรณ์",
+              activityNo: "1",
+              transferIn: 0,
+              transferOut: 0,
+              payAmount: 40000,
+              date: "2026-08-20",
+              note: "เบิกจ่ายงวดที่ 1"
+            }
+          ]
+        }
+      ],
+      activeProjectId: 1
+    };
+
+    function App() {
+      const [db, setDb] = useState(() => {
+        try {
+          const localData = localStorage.getItem(STORAGE_KEY);
+          return localData ? JSON.parse(localData) : initialDB;
+        } catch (e) {
+          return initialDB;
+        }
+      });
+
+      const [activeTab, setActiveTab] = useState('index');
+      const [editingProject, setEditingProject] = useState({
+        jobName: '', jobNo: '', department: '', networkNo: ''
+      });
+
+      const [entryType, setEntryType] = useState('payment'); // 'payment' | 'transfer'
+
+      // ฟอร์มเบิกจ่าย
+      const [deductionForm, setDeductionForm] = useState({
+        category: 'labor', payAmount: '', note: ''
+      });
+
+      // ฟอร์มโอนงบระหว่างหมวด
+      const [transferForm, setTransferForm] = useState({
+        fromCategory: 'labor', toCategory: 'misc', amount: '', note: ''
+      });
+
+      // รายการที่ถูกเลือกจากประวัติการตัดงบ/โอนงบประมาณ เพื่อนำไปแสดงในใบตัดงบ (5)
+      const [selectedDeductionIds, setSelectedDeductionIds] = useState([]);
+
+      // คำค้นหาในตารางสารบัญโครงการทั้งหมด (1)
+      const [projectSearchQuery, setProjectSearchQuery] = useState('');
+
+      const toggleDeductionSelection = (dedId) => {
+        setSelectedDeductionIds(prev =>
+          prev.includes(dedId) ? prev.filter(id => id !== dedId) : [...prev, dedId]
+        );
+      };
+
+      const selectAllDeductions = () => {
+        setSelectedDeductionIds((activeProject?.deductions || []).map(d => d.id));
+      };
+
+      const clearAllDeductionSelections = () => {
+        setSelectedDeductionIds([]);
+      };
+
+      useEffect(() => {
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+        } catch (e) {
+          console.error("Failed to sync persistent database", e);
+        }
+      }, [db]);
+
+      const activeProject = db.projects.find(p => p.id === db.activeProjectId) || db.projects[0];
+      const activeProjectIndex = db.projects.findIndex(p => p.id === db.activeProjectId) + 1;
+
+      const calcBudget100 = (proj) => {
+        if (!proj || !proj.budget100) return { labor: 0, supervision: 0, transport: 0, misc: 0, total: 0 };
+        const l = Number(proj.budget100.labor?.amount || 0);
+        const s = Number(proj.budget100.supervision?.amount || 0);
+        const t = Number(proj.budget100.transport?.amount || 0);
+        const m = Number(proj.budget100.misc?.amount || 0);
+        return { labor: l, supervision: s, transport: t, misc: m, total: l + s + t + m };
+      };
+
+      const calcBudget80 = (proj) => {
+        const b100 = calcBudget100(proj);
+        return {
+          labor: b100.labor * 0.8,
+          supervision: b100.supervision * 0.8,
+          transport: b100.transport * 0.8,
+          misc: b100.misc * 0.8,
+          total: b100.total * 0.8
+        };
+      };
+
+      const calcCategorySummary = (proj, catKey) => {
+        const b80 = calcBudget80(proj)[catKey] || 0;
+        const catDeductions = (proj?.deductions || []).filter(d => d.category === catKey);
+        const transferIn = catDeductions.reduce((sum, d) => sum + Number(d.transferIn || 0), 0);
+        const transferOut = catDeductions.reduce((sum, d) => sum + Number(d.transferOut || 0), 0);
+        const paid = catDeductions.reduce((sum, d) => sum + Number(d.payAmount || 0), 0);
+        const availableBudget = b80 + transferIn - transferOut;
+        const remaining = availableBudget - paid;
+        return { b80, transferIn, transferOut, availableBudget, paid, remaining };
+      };
+
+      const calcProjectTotals = (proj) => {
+        const b80Total = calcBudget80(proj).total;
+        const categories = ['labor', 'supervision', 'transport', 'misc'];
+        let totalPaid = 0;
+        let totalNetRemaining = 0;
+
+        categories.forEach(cat => {
+          const sum = calcCategorySummary(proj, cat);
+          totalPaid += sum.paid;
+          totalNetRemaining += sum.remaining;
+        });
+
+        return { b80Total, totalPaid, totalNetRemaining };
+      };
+
+      const handleSaveProjectIndex = (e) => {
+        e.preventDefault();
+        if (!editingProject.jobName || !editingProject.jobNo) return;
+        const newProjId = Date.now();
+        const newProj = {
+          id: newProjId,
+          ...editingProject,
+          budget100: {
+            labor: { amount: 0, activity: '', activityNo: '' },
+            supervision: { amount: 0, activity: '', activityNo: '' },
+            transport: { amount: 0, activity: '', activityNo: '' },
+            misc: { amount: 0, activity: '', activityNo: '' }
+          },
+          deductions: []
+        };
+        setDb(prev => ({
+          ...prev,
+          projects: [...prev.projects, newProj],
+          activeProjectId: newProjId
+        }));
+        setEditingProject({ jobName: '', jobNo: '', department: '', networkNo: '' });
+        alert('สร้างสารบัญงานใหม่เรียบร้อยแล้ว');
+      };
+
+      const handleDeleteProject = (id) => {
+        if (db.projects.length <= 1) {
+          alert('ไม่สามารถลบโครงการสุดท้ายได้');
+          return;
+        }
+        if (confirm('คุณต้องการลบโครงการนี้ใช่หรือไม่?')) {
+          setDb(prev => {
+            const nextProjects = prev.projects.filter(p => p.id !== id);
+            return {
+              ...prev,
+              projects: nextProjects,
+              activeProjectId: prev.activeProjectId === id ? nextProjects[0].id : prev.activeProjectId
+            };
+          });
+        }
+      };
+
+      const handleClearAllStorage = () => {
+        const confirm1 = confirm("คำเตือน: คุณต้องการลบข้อมูลโครงการและรายการเบิกจ่ายทั้งหมดใน Storage ใช่หรือไม่?");
+        if (confirm1) {
+          const confirm2 = confirm("ยืนยันอีกครั้ง! การกระทำนี้ไม่สามารถย้อนกลับได้ ข้อมูลทั้งหมดจะถูกรีเซ็ตเป็นค่าเริ่มต้น");
+          if (confirm2) {
+            localStorage.removeItem(STORAGE_KEY);
+            setDb(initialDB);
+            alert("ลบข้อมูลใน Storage และรีเซ็ตระบบเรียบร้อยแล้ว");
+          }
+        }
+      };
+
+      const updateBudget100Field = (cat, field, val) => {
+        setDb(prev => ({
+          ...prev,
+          projects: prev.projects.map(p => p.id === prev.activeProjectId ? {
+            ...p,
+            budget100: {
+              ...p.budget100,
+              [cat]: { ...p.budget100[cat], [field]: field === 'amount' ? Number(val) : val }
+            }
+          } : p)
+        }));
+      };
+
+      // บันทึกการเบิกจ่ายปกติ
+      const handleSaveDeduction = (e) => {
+        e.preventDefault();
+        if (!activeProject) return;
+        const catNames = { labor: 'ค่าแรง', supervision: 'ค่าควบคุมงาน', transport: 'ค่าขนส่ง', misc: 'ค่าเบ็ดเตล็ด' };
+        const newDeduction = {
+          id: 'DED-' + Date.now().toString().slice(-6),
+          category: deductionForm.category,
+          categoryName: catNames[deductionForm.category],
+          activity: activeProject.budget100?.[deductionForm.category]?.activity || '-',
+          activityNo: activeProject.budget100?.[deductionForm.category]?.activityNo || '-',
+          transferIn: 0,
+          transferOut: 0,
+          payAmount: Number(deductionForm.payAmount || 0),
+          date: new Date().toISOString().split('T')[0],
+          note: deductionForm.note
+        };
+        setDb(prev => ({
+          ...prev,
+          projects: prev.projects.map(p => p.id === prev.activeProjectId ? {
+            ...p, deductions: [newDeduction, ...(p.deductions || [])]
+          } : p)
+        }));
+        setDeductionForm({ category: 'labor', payAmount: '', note: '' });
+        alert('บันทึกการเบิกจ่ายเรียบร้อย');
+      };
+
+      // บันทึกการโอนเงินระหว่างหมวด (โอนออก -> รับโอน)
+      const handleSaveTransfer = (e) => {
+        e.preventDefault();
+        if (!activeProject) return;
+
+        const transferAmt = Number(transferForm.amount || 0);
+        if (transferAmt <= 0) {
+          alert('กรุณาระบุจำนวนเงินที่ต้องการโอน');
+          return;
+        }
+
+        if (transferForm.fromCategory === transferForm.toCategory) {
+          alert('หมวดโอนออกและหมวดรับโอนต้องไม่เป็นหมวดเดียวกัน');
+          return;
+        }
+
+        const catNames = { labor: 'ค่าแรง', supervision: 'ค่าควบคุมงาน', transport: 'ค่าขนส่ง', misc: 'ค่าเบ็ดเตล็ด' };
+        const fromSum = calcCategorySummary(activeProject, transferForm.fromCategory);
+
+        if (transferAmt > fromSum.remaining) {
+          if (!confirm(`ยอดเงินคงเหลือในหมวด [${catNames[transferForm.fromCategory]}] มีเพียง ฿${fromSum.remaining.toLocaleString()} ซึ่งน้อยกว่ายอดที่ต้องการโอน ฿${transferAmt.toLocaleString()} ต้องการโอนต่อหรือไม่?`)) {
+            return;
+          }
+        }
+
+        const timestamp = Date.now().toString().slice(-6);
+        const today = new Date().toISOString().split('T')[0];
+        const noteDetail = transferForm.note ? ` (${transferForm.note})` : '';
+
+        // รายการโอนออก
+        const deductionOut = {
+          id: 'TR-OUT-' + timestamp,
+          category: transferForm.fromCategory,
+          categoryName: catNames[transferForm.fromCategory],
+          activity: activeProject.budget100?.[transferForm.fromCategory]?.activity || '-',
+          activityNo: activeProject.budget100?.[transferForm.fromCategory]?.activityNo || '-',
+          transferIn: 0,
+          transferOut: transferAmt,
+          payAmount: 0,
+          date: today,
+          note: `โอนไป [${catNames[transferForm.toCategory]}]${noteDetail}`
+        };
+
+        // รายการรับโอน
+        const deductionIn = {
+          id: 'TR-IN-' + timestamp,
+          category: transferForm.toCategory,
+          categoryName: catNames[transferForm.toCategory],
+          activity: activeProject.budget100?.[transferForm.toCategory]?.activity || '-',
+          activityNo: activeProject.budget100?.[transferForm.toCategory]?.activityNo || '-',
+          transferIn: transferAmt,
+          transferOut: 0,
+          payAmount: 0,
+          date: today,
+          note: `รับโอนจาก [${catNames[transferForm.fromCategory]}]${noteDetail}`
+        };
+
+        setDb(prev => ({
+          ...prev,
+          projects: prev.projects.map(p => p.id === prev.activeProjectId ? {
+            ...p, deductions: [deductionIn, deductionOut, ...(p.deductions || [])]
+          } : p)
+        }));
+
+        setTransferForm({ fromCategory: 'labor', toCategory: 'misc', amount: '', note: '' });
+        alert(`โอนเงินจาก [${catNames[transferForm.fromCategory]}] ไปยัง [${catNames[transferForm.toCategory]}] จำนวน ฿${transferAmt.toLocaleString()} เรียบร้อยแล้ว`);
+      };
+
+      const handleDeleteDeduction = (dedId) => {
+        if (confirm('ยืนยันการลบรายการนี้?')) {
+          setDb(prev => ({
+            ...prev,
+            projects: prev.projects.map(p => p.id === prev.activeProjectId ? {
+              ...p, deductions: p.deductions.filter(d => d.id !== dedId)
+            } : p)
+          }));
+          setSelectedDeductionIds(prev => prev.filter(id => id !== dedId));
+        }
+      };
+
+      // Export ข้อมูลสรุปงบทั้งหมด (หมายเลขงาน / ชื่องาน / งบอนุมัติ 80% / คงเหลือสุทธิ 80%) เป็นไฟล์ Excel
+      const handleExportExcel = () => {
+        if (!db.projects || db.projects.length === 0) {
+          alert('ไม่มีข้อมูลโครงการสำหรับ Export');
+          return;
+        }
+
+        const rows = db.projects.map((p, idx) => {
+          const pSummary = calcProjectTotals(p);
+          return {
+            'ลำดับ': idx + 1,
+            'หมายเลขงาน': p.jobNo || '-',
+            'ชื่องาน': p.jobName || '-',
+            'แผนก': p.department || '-',
+            'เลขโครงข่าย': p.networkNo || '-',
+            'งบอนุมัติ (80%)': pSummary.b80Total,
+            'ยอดคงเหลือสุทธิ (80%)': pSummary.totalNetRemaining
+          };
+        });
+
+        const overallB80 = db.projects.reduce((sum, p) => sum + calcProjectTotals(p).b80Total, 0);
+        const overallRemaining = db.projects.reduce((sum, p) => sum + calcProjectTotals(p).totalNetRemaining, 0);
+
+        rows.push({
+          'ลำดับ': '',
+          'หมายเลขงาน': '',
+          'ชื่องาน': 'รวมทั้งหมด',
+          'แผนก': '',
+          'เลขโครงข่าย': '',
+          'งบอนุมัติ (80%)': overallB80,
+          'ยอดคงเหลือสุทธิ (80%)': overallRemaining
+        });
+
+        const worksheet = XLSX.utils.json_to_sheet(rows);
+        worksheet['!cols'] = [
+          { wch: 6 },  // ลำดับ
+          { wch: 18 }, // หมายเลขงาน
+          { wch: 40 }, // ชื่องาน
+          { wch: 25 }, // แผนก
+          { wch: 16 }, // เลขโครงข่าย
+          { wch: 18 }, // งบอนุมัติ (80%)
+          { wch: 20 }  // ยอดคงเหลือสุทธิ (80%)
+        ];
+
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, worksheet, 'สรุปงบประมาณโครงการ');
+        XLSX.writeFile(workbook, `สรุปงบประมาณโครงการทั้งหมด_${new Date().toISOString().split('T')[0]}.xlsx`);
+      };
+
+      const handleExportJSON = () => {
+        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(db, null, 2));
+        const downloadAnchor = document.createElement('a');
+        downloadAnchor.setAttribute("href", dataStr);
+        downloadAnchor.setAttribute("download", `budget_backup_${new Date().toISOString().split('T')[0]}.json`);
+        document.body.appendChild(downloadAnchor);
+        downloadAnchor.click();
+        downloadAnchor.remove();
+      };
+
+      const handleImportJSON = (e) => {
+        const fileReader = new FileReader();
+        if (e.target.files[0]) {
+          fileReader.readAsText(e.target.files[0], "UTF-8");
+          fileReader.onload = (event) => {
+            try {
+              const parsed = JSON.parse(event.target.result);
+              if (parsed && parsed.projects) {
+                setDb(parsed);
+                alert('นำเข้าข้อมูลสำเร็จ');
+              } else {
+                alert('รูปแบบไฟล์ไม่ถูกต้อง');
+              }
+            } catch (err) {
+              alert('เกิดข้อผิดพลาดในการอ่านไฟล์');
+            }
+          };
+        }
+      };
+
+      const b100 = calcBudget100(activeProject);
+      const b80 = calcBudget80(activeProject);
+      const activeProjectSummary = calcProjectTotals(activeProject);
+      const categoryOptions = [
+        { key: 'labor', name: '1. ค่าแรง' },
+        { key: 'supervision', name: '2. ค่าควบคุมงาน' },
+        { key: 'transport', name: '3. ค่าขนส่ง' },
+        { key: 'misc', name: '4. ค่าเบ็ดเตล็ด' }
+      ];
+
+      // สรุปรวมงบอนุมัติ (80%) และยอดคงเหลือสุทธิ (80%) ของงานทั้งหมด
+      const overallSummary = db.projects.reduce((acc, p) => {
+        const pSummary = calcProjectTotals(p);
+        acc.b80Total += pSummary.b80Total;
+        acc.totalNetRemaining += pSummary.totalNetRemaining;
+        return acc;
+      }, { b80Total: 0, totalNetRemaining: 0 });
+
+      // กรองรายการโครงการตามคำค้นหา (ชื่องาน / หมายเลขงาน / แผนก / เลขโครงข่าย)
+      const filteredProjects = db.projects.filter(p => {
+        const q = projectSearchQuery.trim().toLowerCase();
+        if (!q) return true;
+        return (
+          (p.jobName || '').toLowerCase().includes(q) ||
+          (p.jobNo || '').toLowerCase().includes(q) ||
+          (p.department || '').toLowerCase().includes(q) ||
+          (p.networkNo || '').toLowerCase().includes(q)
+        );
+      });
+
+      return (
+        <div class="min-h-screen flex flex-col">
+          <header class="bg-slate-900 text-white shadow-md no-print">
+            <div class="max-w-7xl mx-auto px-4 py-4 flex flex-wrap justify-between items-center gap-4">
+              <div class="flex items-center space-x-3">
+                <div class="bg-blue-600 p-2 rounded-lg">
+                  <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>
+                </div>
+                <div>
+                  <h1 class="font-bold text-lg">โปรแกรมควบคุมค่าใช้จ่ายงานลงทุน</h1>
+                  <p class="text-xs text-slate-400">ระบบบริหารและตัดงบประมาณตาม Flowchart (Persistent Storage)</p>
+                </div>
+              </div>
+
+              <div class="flex items-center gap-3 text-xs">
+                <div class="bg-slate-800 border border-slate-700 rounded-lg p-2 flex items-center gap-2">
+                  <span class="text-slate-400">เลือกโครงการ:</span>
+                  <select 
+                    class="bg-slate-900 text-white font-medium border-none rounded py-1 px-2 focus:ring-1 focus:ring-blue-500 max-w-xs truncate"
+                    value={db.activeProjectId}
+                    onChange={(e) => setDb(prev => ({ ...prev, activeProjectId: Number(e.target.value) }))}
+                  >
+                    {db.projects.map((p, index) => (
+                      <option key={p.id} value={p.id}>
+                        ลำดับที่ {index + 1}: [{p.jobNo}] {p.jobName.slice(0, 25)}...
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div class="bg-emerald-950 border border-emerald-800 text-emerald-300 px-3 py-1.5 rounded-lg flex items-center gap-1.5 font-mono">
+                  <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                  Storage Connected
+                </div>
+              </div>
+            </div>
+          </header>
+
+          <nav class="bg-white border-b border-slate-200 no-print sticky top-0 z-10 shadow-sm">
+            <div class="max-w-7xl mx-auto px-4 flex overflow-x-auto">
+              {['index', 'budget100', 'budget80', 'deduction', 'voucher'].map((tab, idx) => {
+                const labels = ['1. สารบัญงาน', '2. รายละเอียด (100%)', '3. คำนวณงบ (80%)', '4. บันทึกตัดงบ', '5. ใบตัดงบ & พิมพ์'];
+                return (
+                  <button 
+                    key={tab}
+                    onClick={() => setActiveTab(tab)}
+                    class={`py-3.5 px-5 font-semibold text-sm border-b-2 flex items-center gap-2 whitespace-nowrap transition ${activeTab === tab ? 'border-blue-600 text-blue-600 bg-blue-50/50' : 'border-transparent text-slate-600 hover:text-slate-900'}`}
+                  >
+                    {labels[idx]}
+                  </button>
+                );
+              })}
+            </div>
+          </nav>
+
+          <main class="flex-grow max-w-7xl w-full mx-auto p-4 md:p-6 space-y-6">
+            {activeProject && (
+              <div class="bg-slate-800 text-white rounded-xl p-4 shadow-sm border border-slate-700 flex flex-wrap justify-between items-center gap-4 no-print">
+                <div class="space-y-1">
+                  <div class="flex items-center gap-2">
+                    <span class="bg-blue-600 text-white text-xs font-bold px-2 py-0.5 rounded">ลำดับที่ {activeProjectIndex}</span>
+                    <span class="font-mono text-sm text-blue-300">{activeProject.jobNo}</span>
+                  </div>
+                  <h2 class="text-lg font-bold">{activeProject.jobName}</h2>
+                  <p class="text-xs text-slate-300">แผนก: {activeProject.department} | เลขโครงข่าย: {activeProject.networkNo || '-'}</p>
+                </div>
+                <div class="flex gap-4 border-l border-slate-700 pl-4 text-right">
+                  <div>
+                    <div class="text-xs text-slate-400">งบอนุมัติ (80%)</div>
+                    <div class="text-lg font-bold text-amber-400">฿{activeProjectSummary.b80Total.toLocaleString()}</div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-slate-400">ยอดคงเหลือสุทธิ (80%)</div>
+                    <div class="text-lg font-bold text-emerald-400">฿{activeProjectSummary.totalNetRemaining.toLocaleString()}</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 1 */}
+            {activeTab === 'index' && (
+              <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
+                  <h3 class="font-bold border-b pb-2">1. สร้างสารบัญงานใหม่</h3>
+                  <form onSubmit={handleSaveProjectIndex} class="space-y-3">
+                    <div>
+                      <label class="block text-xs text-slate-600 mb-1">ชื่องาน *</label>
+                      <input type="text" required placeholder="เช่น ขยายเขตระบบจำหน่าย..." class="w-full border p-2 text-sm rounded focus:ring-1 focus:ring-blue-500" value={editingProject.jobName} onChange={e => setEditingProject({...editingProject, jobName: e.target.value})} />
+                    </div>
+                    <div>
+                      <label class="block text-xs text-slate-600 mb-1">หมายเลขงาน *</label>
+                      <input type="text" required placeholder="เช่น JOB-2026-001" class="w-full border p-2 text-sm rounded focus:ring-1 focus:ring-blue-500" value={editingProject.jobNo} onChange={e => setEditingProject({...editingProject, jobNo: e.target.value})} />
+                    </div>
+                    <div>
+                      <label class="block text-xs text-slate-600 mb-1">แผนก</label>
+                      <input type="text" placeholder="เช่น แผนกวิศวกรรม" class="w-full border p-2 text-sm rounded focus:ring-1 focus:ring-blue-500" value={editingProject.department} onChange={e => setEditingProject({...editingProject, department: e.target.value})} />
+                    </div>
+                    <div>
+                      <label class="block text-xs text-slate-600 mb-1">เลขโครงข่าย</label>
+                      <input type="text" placeholder="เช่น NW-8890123" class="w-full border p-2 text-sm rounded focus:ring-1 focus:ring-blue-500" value={editingProject.networkNo} onChange={e => setEditingProject({...editingProject, networkNo: e.target.value})} />
+                    </div>
+                    <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 rounded font-semibold text-sm transition">สร้างสารบัญ (SAVE)</button>
+                  </form>
+
+                  <div class="pt-4 border-t space-y-3">
+                    <h4 class="font-bold text-xs text-slate-500">จัดการข้อมูล (Backup / Restore / Reset)</h4>
+                    <div class="flex gap-2">
+                      <button onClick={handleExportJSON} class="w-1/2 bg-slate-100 hover:bg-slate-200 border text-slate-700 text-xs py-1.5 rounded font-semibold">Export JSON</button>
+                      <label class="w-1/2 bg-slate-100 hover:bg-slate-200 border text-slate-700 text-xs py-1.5 rounded font-semibold text-center cursor-pointer">
+                        Import JSON
+                        <input type="file" accept=".json" onChange={handleImportJSON} class="hidden" />
+                      </label>
+                    </div>
+                    
+                    <button 
+                      type="button" 
+                      onClick={handleClearAllStorage} 
+                      class="w-full bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 text-xs py-2 rounded font-bold transition flex items-center justify-center gap-1"
+                    >
+                      <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                      ล้างข้อมูล Storage ทั้งหมด (Clear All)
+                    </button>
+                  </div>
+                </div>
+
+                <div class="md:col-span-2 bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
+                  <div class="flex flex-wrap justify-between items-center gap-3 border-b pb-2">
+                    <h3 class="font-bold">ตารางสารบัญโครงการทั้งหมด ({filteredProjects.length}{projectSearchQuery ? ` / ${db.projects.length}` : ''})</h3>
+                    <div class="flex flex-wrap items-center gap-2">
+                      <div class="relative w-full sm:w-64">
+                        <svg class="w-4 h-4 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M17 10a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                        <input
+                          type="text"
+                          placeholder="ค้นหาชื่องาน / หมายเลขงาน / แผนก / เลขโครงข่าย..."
+                          class="w-full border p-2 pl-8 pr-8 text-sm rounded focus:ring-1 focus:ring-blue-500"
+                          value={projectSearchQuery}
+                          onChange={e => setProjectSearchQuery(e.target.value)}
+                        />
+                        {projectSearchQuery && (
+                          <button
+                            type="button"
+                            onClick={() => setProjectSearchQuery('')}
+                            class="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                            title="ล้างคำค้นหา"
+                          >
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                          </button>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleExportExcel}
+                        class="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-2 rounded text-xs font-semibold transition flex items-center gap-1.5 whitespace-nowrap"
+                        title="ดาวน์โหลดสรุปงบประมาณทุกโครงการเป็น Excel"
+                      >
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                        Export Excel
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="grid grid-cols-2 gap-4">
+                    <div class="p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                      <div class="text-xs text-amber-800">งบอนุมัติ (80%) รวมทุกงาน</div>
+                      <div class="text-lg font-bold text-amber-700 font-mono">฿{overallSummary.b80Total.toLocaleString()}</div>
+                    </div>
+                    <div class="p-3 bg-emerald-50 border border-emerald-200 rounded-lg">
+                      <div class="text-xs text-emerald-800">ยอดคงเหลือสุทธิ (80%) รวมทุกงาน</div>
+                      <div class="text-lg font-bold text-emerald-700 font-mono">฿{overallSummary.totalNetRemaining.toLocaleString()}</div>
+                    </div>
+                  </div>
+
+                  <div class="overflow-x-auto">
+                    <table class="w-full text-left text-sm border-collapse">
+                      <thead>
+                        <tr class="bg-slate-100 border-b">
+                          <th class="p-2 text-center w-12">ลำดับ</th>
+                          <th class="p-2">หมายเลขงาน</th>
+                          <th class="p-2">ชื่องาน</th>
+                          <th class="p-2">แผนก</th>
+                          <th class="p-2 text-right">งบอนุมัติ (80%)</th>
+                          <th class="p-2 text-right">คงเหลือสุทธิ (80%)</th>
+                          <th class="p-2 text-center">จัดการ</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filteredProjects.length === 0 ? (
+                          <tr><td colSpan="7" class="p-4 text-center text-slate-400">ไม่พบโครงการที่ตรงกับคำค้นหา "{projectSearchQuery}"</td></tr>
+                        ) : (
+                          filteredProjects.map((p) => {
+                            const idx = db.projects.findIndex(dp => dp.id === p.id);
+                            const pSummary = calcProjectTotals(p);
+                            return (
+                              <tr key={p.id} class={`border-b ${p.id === db.activeProjectId ? 'bg-blue-50/70' : 'hover:bg-slate-50'}`}>
+                                <td class="p-2 text-center font-bold text-slate-600">{idx + 1}</td>
+                                <td class="p-2 font-mono font-bold text-blue-900">{p.jobNo}</td>
+                                <td class="p-2 font-medium">{p.jobName}</td>
+                                <td class="p-2 text-slate-700">{p.department || '-'}</td>
+                                <td class="p-2 text-right font-mono text-slate-700">฿{pSummary.b80Total.toLocaleString()}</td>
+                                <td class="p-2 text-right font-mono font-bold text-emerald-600">฿{pSummary.totalNetRemaining.toLocaleString()}</td>
+                                <td class="p-2 text-center space-x-1">
+                                  <button onClick={() => setDb(prev => ({ ...prev, activeProjectId: p.id }))} class={`px-2.5 py-1 text-xs rounded font-medium ${p.id === db.activeProjectId ? 'bg-emerald-600 text-white' : 'bg-blue-600 text-white'}`}>
+                                    {p.id === db.activeProjectId ? 'เลือกอยู่' : 'เลือก'}
+                                  </button>
+                                  <button onClick={() => handleDeleteProject(p.id)} class="px-2 py-1 text-xs bg-rose-100 hover:bg-rose-200 text-rose-700 rounded">
+                                    ลบ
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                      <tfoot>
+                        <tr class="bg-slate-900 text-white font-bold">
+                          <td colSpan="4" class="p-2">รวมทั้งหมด ({db.projects.length} งาน)</td>
+                          <td class="p-2 text-right font-mono text-amber-300">฿{overallSummary.b80Total.toLocaleString()}</td>
+                          <td class="p-2 text-right font-mono text-emerald-400">฿{overallSummary.totalNetRemaining.toLocaleString()}</td>
+                          <td class="p-2"></td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 2 */}
+            {activeTab === 'budget100' && activeProject && (
+              <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-6">
+                <div class="flex justify-between items-center border-b pb-3">
+                  <h3 class="font-bold text-lg">2. รายละเอียดงบประมาณ (100%) และกิจกรรม</h3>
+                  <button onClick={() => alert('บันทึกงบ 100% เรียบร้อย')} class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded text-sm font-semibold transition">บันทึกอัตโนมัติ (Saved)</button>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {categoryOptions.map(cat => (
+                    <div key={cat.key} class="border rounded-xl p-4 bg-slate-50 space-y-3">
+                      <div class="font-bold text-sm border-b pb-1 text-slate-700">{cat.name} (100%)</div>
+                      <div>
+                        <label class="block text-xs text-slate-600 mb-1">จำนวนเงิน (บาท)</label>
+                        <input type="number" class="w-full border p-2 rounded text-sm bg-white font-mono focus:ring-1 focus:ring-blue-500" value={activeProject.budget100?.[cat.key]?.amount || 0} onChange={e => updateBudget100Field(cat.key, 'amount', e.target.value)} />
+                      </div>
+                      <div>
+                        <label class="block text-xs text-slate-600 mb-1">กิจกรรม</label>
+                        <textarea rows="2" class="w-full border p-2 rounded text-xs bg-white focus:ring-1 focus:ring-blue-500" value={activeProject.budget100?.[cat.key]?.activity || ''} onChange={e => updateBudget100Field(cat.key, 'activity', e.target.value)}></textarea>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div class="p-4 bg-amber-50 rounded-xl border border-amber-200 flex flex-wrap justify-between items-center font-bold text-amber-900 gap-2">
+                  <span>ผลรวมงบประมาณ 100% ทั้งหมด</span>
+                  <span class="text-xl text-amber-700 font-mono">฿{b100.total.toLocaleString()}</span>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 3 */}
+            {activeTab === 'budget80' && activeProject && (
+              <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-6">
+                <div class="flex justify-between items-center border-b pb-3">
+                  <h3 class="font-bold text-lg">3. คำนวณงบประมาณเบิกจ่ายเบื้องต้น (80%)</h3>
+                </div>
+                <div class="overflow-x-auto">
+                  <table class="w-full text-left text-sm border-collapse">
+                    <thead>
+                      <tr class="bg-slate-100 border-b">
+                        <th class="p-3">หมวดรายการ</th>
+                        <th class="p-3">กิจกรรม</th>
+                        <th class="p-3 text-right">จำนวนเงิน (100%)</th>
+                        <th class="p-3 text-right bg-emerald-50">จำนวนเงินอนุมัติ (80%)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {categoryOptions.map(cat => (
+                        <tr key={cat.key} class="border-b">
+                          <td class="p-3 font-semibold">{cat.name}</td>
+                          <td class="p-3 text-xs text-slate-600">{activeProject.budget100?.[cat.key]?.activity || '-'}</td>
+                          <td class="p-3 text-right font-mono">฿{(activeProject.budget100?.[cat.key]?.amount || 0).toLocaleString()}</td>
+                          <td class="p-3 text-right font-mono font-bold text-emerald-700 bg-emerald-50/50">฿{((activeProject.budget100?.[cat.key]?.amount || 0)*0.8).toLocaleString()}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr class="bg-slate-900 text-white font-bold">
+                        <td colSpan="2" class="p-3">ผลรวมทั้งสิ้น</td>
+                        <td class="p-3 text-right font-mono text-amber-300">฿{b100.total.toLocaleString()}</td>
+                        <td class="p-3 text-right font-mono text-emerald-400">฿{b80.total.toLocaleString()}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 4 */}
+            {activeTab === 'deduction' && activeProject && (
+              <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
+                  <h3 class="font-bold border-b pb-2">4. บันทึกตัดงบ / โอนงบประมาณ</h3>
+                  
+                  {/* ปุ่มสลับโหมด: เบิกจ่าย / โอนงบ */}
+                  <div class="flex rounded-lg bg-slate-100 p-1 text-xs font-semibold">
+                    <button 
+                      type="button" 
+                      onClick={() => setEntryType('payment')} 
+                      class={`flex-1 py-1.5 rounded-md transition ${entryType === 'payment' ? 'bg-white shadow text-purple-700 font-bold' : 'text-slate-600 hover:text-slate-900'}`}
+                    >
+                      💳 บันทึกการเบิกจ่าย
+                    </button>
+                    <button 
+                      type="button" 
+                      onClick={() => setEntryType('transfer')} 
+                      class={`flex-1 py-1.5 rounded-md transition ${entryType === 'transfer' ? 'bg-white shadow text-blue-700 font-bold' : 'text-slate-600 hover:text-slate-900'}`}
+                    >
+                      🔄 โอนเงินระหว่างหมวด
+                    </button>
+                  </div>
+
+                  {/* โหมด 1: บันทึกการเบิกจ่าย */}
+                  {entryType === 'payment' && (
+                    <form onSubmit={handleSaveDeduction} class="space-y-3">
+                      <div>
+                        <label class="block text-xs text-slate-600 mb-1">เลือกหมวดเงินที่ต้องการเบิก</label>
+                        <select class="w-full border p-2 text-sm rounded bg-white focus:ring-1 focus:ring-purple-500" value={deductionForm.category} onChange={e => setDeductionForm({...deductionForm, category: e.target.value})}>
+                          {categoryOptions.map(opt => <option key={opt.key} value={opt.key}>{opt.name}</option>)}
+                        </select>
+                      </div>
+
+                      <div class="p-3 bg-slate-50 rounded-lg text-xs space-y-1.5 border">
+                        <div>กิจกรรม: <span class="font-semibold text-slate-800">{activeProject.budget100?.[deductionForm.category]?.activity || '-'}</span></div>
+                        <div>งบอนุมัติ 80%: <span class="font-mono font-bold text-blue-700">฿{b80[deductionForm.category]?.toLocaleString()}</span></div>
+                        <div>คงเหลือสุทธิปัจจุบัน: <span class="font-mono font-bold text-emerald-600">฿{calcCategorySummary(activeProject, deductionForm.category).remaining.toLocaleString()}</span></div>
+                      </div>
+
+                      <div>
+                        <label class="block text-xs font-bold text-rose-700 mb-1">จ่ายครั้งนี้ (บาท) *</label>
+                        <input type="number" required placeholder="0.00" class="w-full border-2 border-rose-400 p-2 text-base font-bold text-rose-700 rounded font-mono focus:ring-1 focus:ring-rose-500" value={deductionForm.payAmount} onChange={e => setDeductionForm({...deductionForm, payAmount: e.target.value})} />
+                      </div>
+
+                      <div>
+                        <label class="block text-xs text-slate-600 mb-1">หมายเหตุ / เลขที่ใบเสร็จ</label>
+                        <input type="text" placeholder="ระบุรายละเอียดเพิ่มเติม" class="w-full border p-2 text-xs rounded" value={deductionForm.note} onChange={e => setDeductionForm({...deductionForm, note: e.target.value})} />
+                      </div>
+
+                      <button type="submit" class="w-full bg-purple-600 hover:bg-purple-700 text-white py-2.5 rounded font-semibold text-sm transition">บันทึกการตัดงบ (SAVE)</button>
+                    </form>
+                  )}
+
+                  {/* โหมด 2: โอนเงินระหว่างหมวด (หักยอดคงเหลืออัตโนมัติ) */}
+                  {entryType === 'transfer' && (
+                    <form onSubmit={handleSaveTransfer} class="space-y-3">
+                      <div class="p-2.5 bg-blue-50 text-blue-900 border border-blue-200 rounded-lg text-xs">
+                        💡 **ระบบโอนงบประมาณ:** ยอดคงเหลือของหมวดโอนออกจะถูกหักออกทันที และเพิ่มเข้าหมวดรับโอน
+                      </div>
+
+                      <div>
+                        <label class="block text-xs font-bold text-rose-700 mb-1">1. หมวดโอนออก (หักยอดเงิน) *</label>
+                        <select class="w-full border-2 border-rose-200 p-2 text-sm rounded bg-white focus:ring-1 focus:ring-rose-500" value={transferForm.fromCategory} onChange={e => setTransferForm({...transferForm, fromCategory: e.target.value})}>
+                          {categoryOptions.map(opt => <option key={opt.key} value={opt.key}>{opt.name}</option>)}
+                        </select>
+                        <div class="text-[11px] text-slate-500 mt-1">
+                          ยอดคงเหลือหมวดนี้: <span class="font-mono font-bold text-rose-600">฿{calcCategorySummary(activeProject, transferForm.fromCategory).remaining.toLocaleString()}</span>
+                        </div>
+                      </div>
+
+                      <div class="text-center text-slate-400 font-bold">⬇️ โอนไปยัง ⬇️</div>
+
+                      <div>
+                        <label class="block text-xs font-bold text-emerald-700 mb-1">2. หมวดรับโอน (เพิ่มยอดเงิน) *</label>
+                        <select class="w-full border-2 border-emerald-200 p-2 text-sm rounded bg-white focus:ring-1 focus:ring-emerald-500" value={transferForm.toCategory} onChange={e => setTransferForm({...transferForm, toCategory: e.target.value})}>
+                          {categoryOptions.map(opt => <option key={opt.key} value={opt.key}>{opt.name}</option>)}
+                        </select>
+                        <div class="text-[11px] text-slate-500 mt-1">
+                          ยอดคงเหลือหมวดนี้: <span class="font-mono font-bold text-emerald-600">฿{calcCategorySummary(activeProject, transferForm.toCategory).remaining.toLocaleString()}</span>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label class="block text-xs font-bold text-blue-800 mb-1">จำนวนเงินที่ต้องการโอน (บาท) *</label>
+                        <input type="number" required placeholder="0.00" class="w-full border-2 border-blue-400 p-2 text-base font-bold text-blue-800 rounded font-mono focus:ring-1 focus:ring-blue-500" value={transferForm.amount} onChange={e => setTransferForm({...transferForm, amount: e.target.value})} />
+                      </div>
+
+                      <div>
+                        <label class="block text-xs text-slate-600 mb-1">เหตุผลการโอน / หมายเหตุ</label>
+                        <input type="text" placeholder="เช่น ถัวเฉลี่ยงบประมาณตามอนุมัติ" class="w-full border p-2 text-xs rounded" value={transferForm.note} onChange={e => setTransferForm({...transferForm, note: e.target.value})} />
+                      </div>
+
+                      <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2.5 rounded font-semibold text-sm transition">ยืนยันการโอนเงิน (TRANSFER)</button>
+                    </form>
+                  )}
+                </div>
+
+                <div class="lg:col-span-2 space-y-6">
+                  <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
+                    <h3 class="font-bold border-b pb-2 text-sm">สรุปสถานะงบประมาณแยกตาม 4 หมวด</h3>
+                    <div class="overflow-x-auto">
+                      <table class="w-full text-left text-xs border-collapse">
+                        <thead>
+                          <tr class="bg-slate-100 border-b">
+                            <th class="p-2">หมวด</th>
+                            <th class="p-2 text-right">งบ 80%</th>
+                            <th class="p-2 text-right">รับโอน (+)</th>
+                            <th class="p-2 text-right">โอนออก (-)</th>
+                            <th class="p-2 text-right">กรอบคงเหลือ</th>
+                            <th class="p-2 text-right font-semibold text-purple-800">จ่ายไปแล้ว (สะสม)</th>
+                            <th class="p-2 text-right font-bold">คงเหลือสุทธิ</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {categoryOptions.map(cat => {
+                            const sum = calcCategorySummary(activeProject, cat.key);
+                            return (
+                              <tr key={cat.key} class="border-b">
+                                <td class="p-2 font-semibold">{cat.name}</td>
+                                <td class="p-2 text-right font-mono">฿{sum.b80.toLocaleString()}</td>
+                                <td class="p-2 text-right font-mono text-emerald-600 font-bold">+฿{sum.transferIn.toLocaleString()}</td>
+                                <td class="p-2 text-right font-mono text-rose-600 font-bold">-฿{sum.transferOut.toLocaleString()}</td>
+                                <td class="p-2 text-right font-mono text-blue-700 font-semibold">฿{sum.availableBudget.toLocaleString()}</td>
+                                <td class="p-2 text-right font-mono text-purple-700 font-semibold">฿{sum.paid.toLocaleString()}</td>
+                                <td class="p-2 text-right font-mono text-emerald-600 font-bold">฿{sum.remaining.toLocaleString()}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
+                    <h3 class="font-bold border-b pb-2 text-sm">กิจกรรม</h3>
+                    <div class="overflow-x-auto">
+                      <table class="w-full text-left text-xs border-collapse">
+                        <thead>
+                          <tr class="bg-slate-100 border-b">
+                            <th class="p-2">หมวด</th>
+                            <th class="p-2">กิจกรรม</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {categoryOptions.map(cat => (
+                            <tr key={cat.key} class="border-b">
+                              <td class="p-2 font-semibold">{cat.name}</td>
+                              <td class="p-2 text-slate-700">{activeProject.budget100?.[cat.key]?.activity || '-'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
+                    <div class="flex flex-wrap justify-between items-center gap-2 border-b pb-2">
+                      <h3 class="font-bold text-sm">ประวัติการตัดงบ / โอนงบประมาณ ({activeProject.deductions?.length || 0})</h3>
+                      <div class="flex items-center gap-2 text-xs">
+                        <span class="text-slate-500">เลือกแล้ว {selectedDeductionIds.filter(id => (activeProject.deductions || []).some(d => d.id === id)).length} รายการ</span>
+                        <button type="button" onClick={selectAllDeductions} class="px-2 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded font-semibold">เลือกทั้งหมด</button>
+                        <button type="button" onClick={clearAllDeductionSelections} class="px-2 py-1 bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200 rounded font-semibold">ยกเลิกที่เลือก</button>
+                      </div>
+                    </div>
+                    <p class="text-[11px] text-slate-500">✅ ติ๊กเลือกรายการที่ต้องการนำไปแสดงใน "5. ใบตัดงบควบคุมค่าใช้จ่าย"</p>
+                    <div class="overflow-x-auto">
+                      <table class="w-full text-left text-xs border-collapse">
+                        <thead>
+                          <tr class="bg-slate-100 border-b">
+                            <th class="p-2 text-center w-10">เลือก</th>
+                            <th class="p-2">วันที่</th>
+                            <th class="p-2">หมวด</th>
+                            <th class="p-2 text-center">กิจกรรม</th>
+                            <th class="p-2 text-right">จ่ายครั้งนี้</th>
+                            <th class="p-2 text-right">โอนเข้า (+) / โอนออก (-)</th>
+                            <th class="p-2">รายละเอียด / หมายเหตุ</th>
+                            <th class="p-2 text-center">จัดการ</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(activeProject.deductions || []).length === 0 ? (
+                            <tr><td colSpan="8" class="p-4 text-center text-slate-400">ยังไม่มีประวัติการทำรายการ</td></tr>
+                          ) : (
+                            activeProject.deductions.map(d => (
+                              <tr key={d.id} class={`border-b hover:bg-slate-50 ${selectedDeductionIds.includes(d.id) ? 'bg-blue-50/60' : ''}`}>
+                                <td class="p-2 text-center">
+                                  <input
+                                    type="checkbox"
+                                    class="w-4 h-4 accent-blue-600 cursor-pointer"
+                                    checked={selectedDeductionIds.includes(d.id)}
+                                    onChange={() => toggleDeductionSelection(d.id)}
+                                  />
+                                </td>
+                                <td class="p-2 font-mono text-slate-500">{d.date}</td>
+                                <td class="p-2 font-medium">{d.categoryName}</td>
+                                <td class="p-2 text-center font-medium">{d.activity || '-'}</td>
+                                <td class="p-2 text-right font-mono text-rose-600 font-semibold">
+                                  {d.payAmount > 0 ? `฿${d.payAmount.toLocaleString()}` : '-'}
+                                </td>
+                                <td class="p-2 text-right font-mono font-bold">
+                                  {d.transferIn > 0 && <span class="text-emerald-600">+฿{d.transferIn.toLocaleString()}</span>}
+                                  {d.transferOut > 0 && <span class="text-rose-600">-฿{d.transferOut.toLocaleString()}</span>}
+                                  {!d.transferIn && !d.transferOut && '-'}
+                                </td>
+                                <td class="p-2 text-slate-600">{d.note || '-'}</td>
+                                <td class="p-2 text-center">
+                                  <button onClick={() => handleDeleteDeduction(d.id)} class="text-rose-600 hover:text-rose-800 text-xs underline">ลบ</button>
+                                </td>
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 5 */}
+            {activeTab === 'voucher' && activeProject && (
+              <div class="space-y-4">
+                <div class="flex justify-between items-center no-print bg-white p-4 rounded-xl border">
+                  <div>
+                    <h3 class="font-bold">5. ใบตัดงบควบคุมค่าใช้จ่าย</h3>
+                    <p class="text-xs text-slate-500">ตรวจสอบความถูกต้องก่อนกดพิมพ์เอกสาร</p>
+                  </div>
+                  <button onClick={() => window.print()} class="bg-slate-900 hover:bg-slate-800 text-white px-5 py-2 rounded text-sm font-semibold transition flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"></path></svg>
+                    พิมพ์เอกสาร (Print)
+                  </button>
+                </div>
+                
+                <div id="printable-voucher" class="bg-white p-8 rounded-xl border border-slate-300 shadow-md max-w-4xl mx-auto space-y-6">
+                  <div class="text-center border-b-2 border-slate-900 pb-4">
+                    <h1 class="text-2xl font-bold">ใบตัดงบควบคุมค่าใช้จ่าย</h1>
+                    <p class="text-sm text-slate-600">เอกสารอนุมัติเบิกจ่ายและควบคุมงบประมาณงานลงทุน</p>
+                  </div>
+                  
+                  <div class="grid grid-cols-2 gap-4 text-sm bg-slate-50 p-4 rounded-lg border border-slate-200">
+                    <div class="space-y-1">
+                      <div><span class="font-bold">ชื่องาน:</span> {activeProject.jobName} (ลำดับที่ {activeProjectIndex})</div>
+                      <div><span class="font-bold">หมายเลขงาน:</span> <span class="font-mono">{activeProject.jobNo}</span></div>
+                    </div>
+                    <div class="space-y-1 text-right">
+                      <div><span class="font-bold">แผนก:</span> {activeProject.department}</div>
+                      <div><span class="font-bold">เลขโครงข่าย:</span> <span class="font-mono">{activeProject.networkNo || '-'}</span></div>
+                    </div>
+                  </div>
+
+                  <table class="w-full text-left text-sm border-collapse border border-slate-800">
+                    <thead>
+                      <tr class="bg-slate-100 border-b border-slate-800">
+                        <th class="p-2 border border-slate-800">หมวดเงิน</th>
+                        <th class="p-2 border border-slate-800">กิจกรรม</th>
+                        <th class="p-2 border border-slate-800 text-right">งบ 80%</th>
+                        <th class="p-2 border border-slate-800 text-right">โอนเข้า/ออก</th>
+                        <th class="p-2 border border-slate-800 text-right">จ่ายสะสม</th>
+                        <th class="p-2 border border-slate-800 text-right">คงเหลือสุทธิ</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {categoryOptions.map(cat => {
+                        const sum = calcCategorySummary(activeProject, cat.key);
+                        const catDeductionsNotes = (activeProject.deductions || [])
+                          .filter(d => d.category === cat.key && d.note)
+                          .map(d => `${d.date}: ${d.note}`)
+                          .join(' | ');
+
+                        return (
+                          <tr key={cat.key} class="border-b border-slate-800">
+                            <td class="p-2 border border-slate-800 font-medium">{cat.name}</td>
+                            <td class="p-2 border border-slate-800 text-xs">
+                              <div class="font-semibold text-slate-800">{activeProject.budget100?.[cat.key]?.activity || '-'}</div>
+                              {catDeductionsNotes && (
+                                <div class="text-slate-600 italic mt-1 bg-slate-50 p-1 rounded border border-slate-200">
+                                  <span class="font-bold">หมายเหตุเบิกจ่าย/โอน:</span> {catDeductionsNotes}
+                                </div>
+                              )}
+                            </td>
+                            <td class="p-2 border border-slate-800 text-right font-mono">฿{sum.b80.toLocaleString()}</td>
+                            <td class="p-2 border border-slate-800 text-right font-mono">฿{(sum.transferIn - sum.transferOut).toLocaleString()}</td>
+                            <td class="p-2 border border-slate-800 text-right font-mono font-bold text-rose-700">฿{sum.paid.toLocaleString()}</td>
+                            <td class="p-2 border border-slate-800 text-right font-mono font-bold text-emerald-800">฿{sum.remaining.toLocaleString()}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+
+                  <div class="space-y-2 no-print">
+                    <div class="p-2.5 bg-blue-50 text-blue-900 border border-blue-200 rounded-lg text-xs">
+                      💡 ตารางด้านล่างจะแสดงเฉพาะรายการที่ติ๊กเลือกไว้จากแท็บ "4. บันทึกตัดงบ" เท่านั้น หากต้องการเพิ่ม/ลดรายการ กรุณากลับไปติ๊กเลือกที่แท็บ 4
+                    </div>
+                  </div>
+                  <div class="space-y-2">
+                    <h3 class="font-bold text-sm border-b border-slate-800 pb-1">
+                      ประวัติการตัดงบ / โอนงบประมาณ (เลือกแสดง {(activeProject.deductions || []).filter(d => selectedDeductionIds.includes(d.id)).length} จาก {activeProject.deductions?.length || 0} รายการ)
+                    </h3>
+                    <table class="w-full text-left text-xs border-collapse border border-slate-800">
+                      <thead>
+                        <tr class="bg-slate-100 border-b border-slate-800">
+                          <th class="p-2 border border-slate-800">วันที่</th>
+                          <th class="p-2 border border-slate-800">หมวด</th>
+                          <th class="p-2 border border-slate-800 text-center">กิจกรรม</th>
+                          <th class="p-2 border border-slate-800 text-right">จ่ายครั้งนี้</th>
+                          <th class="p-2 border border-slate-800 text-right">โอนเข้า (+) / โอนออก (-)</th>
+                          <th class="p-2 border border-slate-800">รายละเอียด / หมายเหตุ</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(activeProject.deductions || []).filter(d => selectedDeductionIds.includes(d.id)).length === 0 ? (
+                          <tr><td colSpan="6" class="p-2 border border-slate-800 text-center text-slate-400">ยังไม่ได้เลือกรายการ — กรุณาไปติ๊กเลือกที่แท็บ "4. บันทึกตัดงบ"</td></tr>
+                        ) : (
+                          activeProject.deductions.filter(d => selectedDeductionIds.includes(d.id)).map(d => (
+                            <tr key={d.id} class="border-b border-slate-800">
+                              <td class="p-2 border border-slate-800 font-mono">{d.date}</td>
+                              <td class="p-2 border border-slate-800">{d.categoryName}</td>
+                              <td class="p-2 border border-slate-800 text-center font-medium">{d.activity || '-'}</td>
+                              <td class="p-2 border border-slate-800 text-right font-mono text-rose-700 font-semibold">
+                                {d.payAmount > 0 ? `฿${d.payAmount.toLocaleString()}` : '-'}
+                              </td>
+                              <td class="p-2 border border-slate-800 text-right font-mono font-bold">
+                                {d.transferIn > 0 && <span class="text-emerald-700">+฿{d.transferIn.toLocaleString()}</span>}
+                                {d.transferOut > 0 && <span class="text-rose-700">-฿{d.transferOut.toLocaleString()}</span>}
+                                {!d.transferIn && !d.transferOut && '-'}
+                              </td>
+                              <td class="p-2 border border-slate-800 text-slate-700">{d.note || '-'}</td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div class="grid grid-cols-2 gap-12 pt-16 text-center text-sm">
+                    <div class="space-y-12">
+                      <div class="border-b border-dashed border-slate-400 w-3/4 mx-auto"></div>
+                      <div>
+                        <p class="font-bold">ลงชื่อ..........................................................</p>
+                        <p class="font-semibold text-slate-800 mt-1">( พชง. ควบคุมงาน )</p>
+                      </div>
+                    </div>
+                    <div class="space-y-12">
+                      <div class="border-b border-dashed border-slate-400 w-3/4 mx-auto"></div>
+                      <div>
+                        <p class="font-bold">ลงชื่อ..........................................................</p>
+                        <p class="font-semibold text-slate-800 mt-1">( พชง. ควบคุมงบ )</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </main>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
